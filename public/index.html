@@ -82,7 +82,7 @@ nav button.gb{font-weight:600;margin-top:4px}nav button.gb.cur{color:var(--ac)}n
 </main>
 </div>
 <script>
-let TOKEN=sessionStorage.getItem('tk'),ROLE=sessionStorage.getItem('rl'),Q={},tm=null;
+let TOKEN=sessionStorage.getItem('tk'),ROLE=sessionStorage.getItem('rl'),Q={},P={},tm=null;
 let S={groups:[],gid:1,g:null,students:[],nid:1,topics:[],tid:1,cur:null,k:4},tab='a',page='g',hist=null,editG=null;
 const KEY='savoljavob_v1';
 const $=s=>document.querySelector(s);
@@ -121,10 +121,10 @@ function save(){clearTimeout(tm);tm=setTimeout(()=>api('save',{state:S}).catch(e
 function show(x){['login','stu','adm'].forEach(i=>$('#'+i).hidden=i!==x)}
 function logout(){sessionStorage.clear();TOKEN=ROLE=null;show('login')}
 async function doLogin(){$('#le').textContent='';try{const d=await api('login',{login:$('#lu').value.trim(),password:$('#lp').value});TOKEN=d.token;ROLE=d.role;sessionStorage.setItem('tk',TOKEN);sessionStorage.setItem('rl',ROLE);$('#lp').value='';boot()}catch(e){$('#le').textContent=e.message}}
-async function rq(){try{Q=(await api('get')).q||{};rView()}catch(e){}}
+async function rq(){try{const d=await api('get');Q=d.q||{};P=d.progress||{};rView()}catch(e){}}
 async function boot(){
  if(!TOKEN)return show('login');
- try{if(ROLE==='admin'){const d=await api('get');Object.assign(S,d.state||{});Q=d.q||{};
+ try{if(ROLE==='admin'){const d=await api('get');Object.assign(S,d.state||{});Q=d.q||{};P=d.progress||{};
    S.students.forEach(s=>{if(!s.login){s.login='u'+String(s.id).padStart(4,'0');s.pw=rp()}});
    if(!G())S.g=S.groups.length?S.groups[0].id:null;if(!T()){const l=gt();S.cur=l.length?l[l.length-1].id:null}
    show('adm');render()}
@@ -134,7 +134,7 @@ async function stuRender(){const d=await api('me');
  const focus=document.activeElement;if(focus&&focus.matches&&focus.matches('textarea'))return;
  $('#stu').innerHTML=`<div class="row" style="justify-content:space-between;margin-bottom:12px"><div><b style="font-size:18px">${esc(d.name)}</b><br><span class="mu">${esc([d.group,d.course?d.course+'-kurs':'',d.dir].filter(Boolean).join(' · '))}</span></div><button data-lo="1">Chiqish</button></div>`+
  (d.topics.map(t=>`<div class="card"><b>${esc(t.name)}</b><p class="mu">Siz ${t.k} ta savol kiritishingiz kerak. Kiritilgan: ${t.mine.filter(x=>x&&x.trim()).length}/${t.k}</p>`+
-  (t.questionsLocked?'<p class="mu">Savollarni topshirish yakunlangan.</p>':Array.from({length:t.k},(_,i)=>`<div class="fld" style="margin-bottom:8px"><label>${i+1}-savol</label><textarea data-t="${t.id}">${esc(t.mine[i]||'')}</textarea></div>`).join('')+`<button class="p" data-sq="${t.id}">Savollarni saqlash</button>`)+
+  (t.questionsLocked?'<p class="mu">Savollarni topshirish yakunlangan.</p>':Array.from({length:t.k},(_,i)=>`<div class="fld" style="margin-bottom:8px"><label>${i+1}-savol</label><textarea data-t="${t.id}" data-q="${i+1}">${esc(t.mine[i]||'')}</textarea></div>`).join('')+`<button class="p" data-sq="${t.id}">Savollarni saqlash</button><p id="autosave-hint" class="mu">Savollar yozish jarayonida avtomatik saqlanadi.</p>`)+
   (t.turnStarted?`<div style="padding:12px;border:1px solid var(--bd);border-radius:10px;margin-top:12px"><b>${t.turnFinished?'Savol-javob yakunlandi':t.myTurn?'Hozir sizning navbatingiz!': 'Navbatingizni kuting'}</b><p class="mu" style="margin:7px 0">${esc(t.turnLabel||'')} ${t.myTurn?' · '+(t.waitingForAdmin?'Savollar tugadi: admin ruxsatini kuting':esc(t.stage)+' · qolgan vaqt: '+fmtSec(t.remainingSeconds)):''}</p></div>`:'<p class="mu" style="margin:12px 0">Savollar hamma tomonidan topshirilgach, o‘qituvchi navbatni ishga tushiradi. Savollar boshlangunga qadar yopiq turadi.</p>')+
   (t.myTurn?`<h3>${t.waitingForAdmin?'Savollar yakunlandi':`Hozirgi savol ${t.questionIndex+1}/${t.questionCount}`}</h3>`+t.inbox.map(x=>`<div class="it" style="align-items:flex-start"><span>${x.from?'<b>Kimdan:</b> '+esc(x.from)+' · ':''}${x.q}-savol<br>${x.text?esc(x.text):'<span class="mu">Savol hali kiritilmagan</span>'}${x.r?'<br>'+RT(x.r):''}</span></div>`).join(''):'')+
   (t.outgoing?.length?`<h3>Navbatdagi talabaga SIZ yuborgan savollar — javobini baholang</h3>`+t.outgoing.map(x=>`<div class="it"><span><b>${esc(x.recipient)}</b> · ${x.q}-savol<br>${esc(x.text)}</span>${x.r?RT(x.r)+`<small class="mu"> (${esc(x.gradedBy||'')})</small>`:`<button class="sm ok" data-sgrade="1" data-st="${t.id}" data-to="${x.to}" data-q="${x.q}" data-v="1">To‘g‘ri</button><button class="sm no" data-sgrade="1" data-st="${t.id}" data-to="${x.to}" data-q="${x.q}" data-v="2">Noto‘g‘ri</button>`}</div>`).join(''):'')+'</div>').join('')||'<div class="card mu">Hozircha sizga mavzu biriktirilmagan.</div>')}
@@ -164,8 +164,9 @@ function rView(){
   const all=ready.every(r=>r.found>=t.k),started=!!t.turnStartedAt,idx=turnIndex(t),active=turnId(t);
   const tm=t.turnPrepMinutes||2,am=t.turnAnswerMinutes||3;
   v.innerHTML=`<div class="card"><h3>Adolatli javob berish navbati</h3><p class="mu">Tizim tasodifiy tartibni tuzadi. Navbatni boshlash va keyingisiga o‘tish faqat admin tugmasi bilan amalga oshadi. Har bir talabaga bir xil tayyorlanish vaqti va har bir savol uchun bir xil vaqt beriladi.</p>
-  <div class="row" style="margin-bottom:10px"><button data-refresh="1">Topshirish holatini yangilash</button><span>${ready.filter(r=>r.found>=t.k).length}/${ids.length} talaba barcha savollarini topshirgan</span></div>
-  <div class="tw"><table><tr><th>Talaba</th><th>Kiritilgan savollar</th></tr>${ready.map(r=>`<tr><td>${esc(nm(r.id))}</td><td>${r.found}/${t.k}</td></tr>`).join('')}</table></div>
+  <div class="row" style="margin-bottom:10px"><button data-refresh="1">Hozir yangilash</button><span><b>${ready.filter(r=>r.found>=t.k).length}/${ids.length}</b> talaba barcha savollarini kiritgan</span></div>
+  <p class="mu">Jami saqlangan savollar: <b>${ready.reduce((n,r)=>n+r.found,0)}/${ids.length*t.k}</b> · Hali kiritilmagan: <b>${ready.reduce((n,r)=>n+Math.max(0,t.k-r.found),0)}</b>. Ma'lumotlar har 3 soniyada yangilanadi; talabalar yozayotganda savollar avtomatik saqlanadi.</p>
+  <div class="tw"><table><tr><th>Talaba</th><th>Kiritgan</th><th>Qolgan</th><th>Hozir qaysi savolni yozmoqda?</th><th>Holat</th></tr>${ready.map(r=>{const p=(P[t.id]||{})[r.id]||{},active=Number(p.activeQuestion),fresh=p.updatedAt&&Date.now()-p.updatedAt<15000,complete=r.found>=t.k;return `<tr><td>${esc(nm(r.id))}</td><td><b>${r.found}</b>/${t.k}</td><td>${Math.max(0,t.k-r.found)}</td><td>${fresh&&active>=1&&active<=t.k?`<b>${active}-savol</b>`:complete?'Barcha savollar tayyor':'Hozir yozmayapti / noma’lum'}</td><td>${complete?'<span class="b-ok">Tayyor</span>':fresh&&active?'Yozmoqda':'Kutilmoqda'}</td></tr>`}).join('')}</table></div>
   ${!started?`<div class="row" style="margin-top:16px"><label>Tayyorlanish (daqiqa): <input id="turnminutes" type="number" min="1" max="30" value="${tm}" style="width:75px"></label><label>Har bir savol vaqti (daqiqa): <input id="answerminutes" type="number" min="1" max="30" value="${am}" style="width:75px"></label><label><input type="checkbox" id="showauthor" ${t.showQuestionAuthor?'checked':''}> Javob beruvchiga savol muallifini ko‘rsatish</label><button class="p" data-maketurn="1" ${!all?'disabled':''}>Tasodifiy navbat yaratish</button></div>${!all?'<p class="mu">Navbatni boshlash uchun hamma talaba o‘z savollarini to‘liq topshirishi kerak.</p>':''}
    ${t.turnQueue&&t.turnQueue.length?`<div class="row" style="margin-top:12px"><button class="p" data-startturn="1">Navbatni boshlash</button><span class="mu">Boshlangandan keyin savollarni tahrirlash yopiladi.</span></div>`:''}`:
    `<p><b>${active?esc(nm(active)):'Barcha navbatlar yakunlangan'}</b>${active?' · '+turnStage(t)+' · qolgan vaqt '+fmtSec(turnSecs(t)):''}</p><p class="mu">Talabalar navbati faqat admin ruxsati bilan almashadi. Savollar esa baholanganda yoki ${am} daqiqalik muddat tugaganda avtomatik almashadi. Tayyorlanish: ${tm} daqiqa.</p>${active?`<button class="p" data-nextturn="1" ${!turnDone(t)?'disabled':''}>Keyingi talabaga ruxsat berish ${!turnDone(t)?'(savollar hali tugamagan)':''}</button>`:''}`}
@@ -243,6 +244,44 @@ function generate(){
   page='a';save();render()};
  if(t.asg.length)dlg('Yangi taqsimot bu mavzudagi natijalarni oʻchiradi. Davom etasizmi?','c',null,run);else run()}
 
+// Students: track the focused question without revealing unfinished draft text to other students.
+let draftTimer=null, draftChain=Promise.resolve(), activeDraft=null;
+function activeQuestionPayload(){
+ const el=document.activeElement;
+ return el&&el.matches&&el.matches('#stu textarea[data-t]') ? {topicId:Number(el.dataset.t),activeQuestion:Number(el.dataset.q)} : null;
+}
+function sendDraft(topicId,activeQuestion){
+ const boxes=[...document.querySelectorAll(`#stu textarea[data-t="${topicId}"]`)];
+ if(!boxes.length)return Promise.resolve();
+ const questions=boxes.map(x=>x.value.trim());
+ draftChain=draftChain.catch(()=>{}).then(()=>api('submit',{topicId,questions,activeQuestion}));
+ return draftChain;
+}
+function queueDraft(topicId,activeQuestion){
+ clearTimeout(draftTimer);
+ draftTimer=setTimeout(()=>sendDraft(topicId,activeQuestion).catch(e=>{const n=$('#autosave-hint');if(n)n.textContent='Avtomatik saqlash xatosi: '+e.message}),650);
+}
+document.addEventListener('focusin',e=>{
+ if(ROLE!=='student'||!e.target.matches('#stu textarea[data-t]'))return;
+ activeDraft={topicId:Number(e.target.dataset.t),activeQuestion:Number(e.target.dataset.q)};
+ api('progress',activeDraft).catch(()=>{});
+});
+document.addEventListener('input',e=>{
+ if(ROLE!=='student'||!e.target.matches('#stu textarea[data-t]'))return;
+ const topicId=Number(e.target.dataset.t), activeQuestion=Number(e.target.dataset.q);
+ queueDraft(topicId,activeQuestion);
+ const hint=$('#autosave-hint');if(hint)hint.textContent='Savollar avtomatik saqlanmoqda…';
+});
+document.addEventListener('focusout',e=>{
+ if(ROLE!=='student'||!e.target.matches('#stu textarea[data-t]'))return;
+ const topicId=Number(e.target.dataset.t);
+ clearTimeout(draftTimer);
+ sendDraft(topicId,null).catch(()=>{}).then(()=>api('progress',{topicId,activeQuestion:null}).catch(()=>{}));
+ activeDraft=null;
+});
+setInterval(()=>{
+ if(ROLE==='student'&&activeDraft&&activeQuestionPayload())api('progress',activeDraft).catch(()=>{});
+},5000);
 document.addEventListener('click',e=>{
  const b=e.target.closest('button');if(!b)return;const d=b.dataset;
  if(b.id==='gadd')addGroup();
@@ -282,7 +321,7 @@ document.addEventListener('change',e=>{if(e.target.id==='srt'){S.sort=e.target.v
 [['#nm',addStudent],['#tn',addTopic],['#gd',addGroup]].forEach(([i,f])=>$(i).addEventListener('keydown',e=>{if(e.key==='Enter')f()}));
 $('#lp').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
 boot();
-setInterval(async()=>{if(!TOKEN)return;try{if(ROLE==='student'){await stuRender()}else if(ROLE==='admin'&&['n','a'].includes(page)&&!tm){const d=await api('get');Object.assign(S,d.state||{});Q=d.q||{};rView()}}catch(e){}},3000);
+setInterval(async()=>{if(!TOKEN)return;try{if(ROLE==='student'){await stuRender()}else if(ROLE==='admin'&&['n','a'].includes(page)&&!tm){const d=await api('get');Object.assign(S,d.state||{});Q=d.q||{};P=d.progress||{};rView()}}catch(e){}},3000);
 </script>
 </body>
 </html>
