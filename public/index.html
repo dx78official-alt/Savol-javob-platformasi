@@ -76,13 +76,14 @@ nav button.gb{font-weight:600;margin-top:4px}nav button.gb.cur{color:var(--ac)}n
 <button class="p" id="gen">Tasodifiy taqsimlash</button>
 </div>
 <p class="mu" id="info" style="margin:8px 0 0"></p>
+<div id="distribution-results" style="margin-top:12px"></div>
 </div>
 
 <div id="view"></div>
 </main>
 </div>
 <script>
-let TOKEN=sessionStorage.getItem('tk'),ROLE=sessionStorage.getItem('rl'),Q={},P={},tm=null;
+let TOKEN=sessionStorage.getItem('tk'),ROLE=sessionStorage.getItem('rl'),Q={},P={},tm=null,monitorAt=0,monitorError='',refreshBusy=false;
 let S={groups:[],gid:1,g:null,students:[],nid:1,topics:[],tid:1,cur:null,k:4},tab='a',page='g',hist=null,editG=null;
 const KEY='savoljavob_v1';
 const $=s=>document.querySelector(s);
@@ -121,10 +122,16 @@ function save(){clearTimeout(tm);tm=setTimeout(()=>api('save',{state:S}).catch(e
 function show(x){['login','stu','adm'].forEach(i=>$('#'+i).hidden=i!==x)}
 function logout(){sessionStorage.clear();TOKEN=ROLE=null;show('login')}
 async function doLogin(){$('#le').textContent='';try{const d=await api('login',{login:$('#lu').value.trim(),password:$('#lp').value});TOKEN=d.token;ROLE=d.role;sessionStorage.setItem('tk',TOKEN);sessionStorage.setItem('rl',ROLE);$('#lp').value='';boot()}catch(e){$('#le').textContent=e.message}}
-async function rq(){try{const d=await api('get');Q=d.q||{};P=d.progress||{};rView()}catch(e){}}
+async function rq(){
+ if(refreshBusy)return;
+ refreshBusy=true;
+ try{const d=await api('get');Q=d.q||{};P=d.progress||{};monitorAt=Date.now();monitorError='';rView()}
+ catch(e){monitorError=e.message; if(['x','n'].includes(page))rView()}
+ finally{refreshBusy=false}
+}
 async function boot(){
  if(!TOKEN)return show('login');
- try{if(ROLE==='admin'){const d=await api('get');Object.assign(S,d.state||{});Q=d.q||{};P=d.progress||{};
+ try{if(ROLE==='admin'){const d=await api('get');Object.assign(S,d.state||{});Q=d.q||{};P=d.progress||{};monitorAt=Date.now();monitorError='';
    S.students.forEach(s=>{if(!s.login){s.login='u'+String(s.id).padStart(4,'0');s.pw=rp()}});
    if(!G())S.g=S.groups.length?S.groups[0].id:null;if(!T()){const l=gt();S.cur=l.length?l[l.length-1].id:null}
    show('adm');render()}
@@ -145,6 +152,24 @@ function rGroups(){
 function rTopics(){
  $('#tlist').innerHTML=gt().map(t=>{const d=t.asg.filter(a=>a.r).length;
   return `<div class="st ${t.id===S.cur?'cur':''}"><span class="nm"><b>${esc(t.name)}</b><br><span class="mu">${t.date} · belgilangan: ${d}/${t.asg.length}</span></span>${t.id===S.cur?'<span class="mu">Joriy</span>':`<button class="sm" data-open="${t.id}">Ochish</button>`}<button class="sm" data-tren="${t.id}">Tahrirlash</button><button class="sm" data-tdel="${t.id}">Oʻchirish</button></div>`}).join('')||'<p class="mu">Bu guruhda mavzu yoʻq.</p>';
+}
+// Taqsimot shu guruh + mavzu uchun saqlangan holatga qarab ko‘rsatiladi.
+function rDistribution(){
+ const t=T(), box=$('#distribution-results'), gen=$('#gen'), k=$('#k');
+ if(!box||!gen)return;
+ const assigned=!!(t&&Array.isArray(t.asg)&&t.asg.length);
+ gen.textContent=assigned?'Qayta tasodifiy taqsimlash':'Tasodifiy taqsimlash';
+ gen.disabled=!t||gs().length<2||!!(t&&t.turnQueue?.length);
+ if(k)k.disabled=!!(t&&t.turnQueue?.length);
+ if(!assigned){box.innerHTML=t?'<p class="mu">Bu guruh va mavzu uchun hali taqsimot amalga oshirilmagan.</p>':'';return}
+ // Savollar manzillari avvalgi saqlangan taqsimotdan olinadi; hech qanday qayta generatsiya qilinmaydi.
+ const rows=t.asg.slice().sort((a,b)=>num(t,a.from)-num(t,b.from)||a.q-b.q);
+ box.innerHTML=`<h3 style="margin:0 0 8px">Taqsimlash natijalari</h3>
+ <p class="mu" style="margin:0 0 8px">${rows.length} ta savol · ${t.order.length} nafar talaba · Har biriga ${t.k} tadan savol. Natijalar ushbu guruh va mavzu uchun saqlangan.</p>
+ <div class="tw"><table><thead><tr><th>Savol beruvchi</th><th>Qaysi savoli</th><th>Javob beruvchi</th></tr></thead><tbody>
+ ${rows.map(a=>`<tr><td>${esc(nm(a.from))}</td><td>${a.q}-savol</td><td>${esc(nm(a.to))}</td></tr>`).join('')}
+ </tbody></table></div>
+ ${t.turnQueue?.length?'<p class="mu">Javob berish navbati yaratilganligi sababli qayta taqsimlash yopiq.</p>':''}`;
 }
 function rList(){
  const g=G();
@@ -187,6 +212,27 @@ function rView(){
   if(hist!==null&&ids.includes(hist))det=`<h3>${esc(nm(hist))} — javoblar tarixi</h3>`+tp.map(x=>{const m=x.asg.filter(a=>a.to===hist).sort((a,b)=>num(x,a.from)-num(x,b.from));
    return m.length?`<p style="margin:8px 0 2px"><b>${esc(x.name)}</b> <span class="mu">${x.date}</span></p>`+m.map(a=>`<div class="it"><span>${lb(x,a.from)} — ${a.q}-savol</span>${RT(a.r)}</div>`).join(''):''}).join('');
   v.innerHTML=`<div class="card"><div class="tw"><table><tr><th>Talaba</th>${tp.map(x=>`<th>${esc(x.name)}</th>`).join('')}<th>Jami</th></tr>${rows}</table></div><p class="mu">Jadval: toʻgʻri javoblar / jami savollar. Batafsil koʻrish uchun talaba ismini bosing.</p>${det}</div>`;return}
+ if(page==='x'){
+  if(!t){v.innerHTML='<div class="card mu">Monitoring uchun avval mavzu yarating.</div>';return}
+  const ids=t.order&&t.order.length?t.order:gs().map(s=>s.id);
+  const rows=ids.map(id=>{
+    const found=((Q[t.id]||{})[id]||[]).filter(q=>typeof q==='string'&&q.trim()).length;
+    const p=(P[t.id]||{})[id]||{},active=Number(p.activeQuestion);
+    const fresh=Number(p.updatedAt)>0&&Date.now()-Number(p.updatedAt)<15000;
+    const done=found>=t.k;
+    return {id,found,remaining:Math.max(0,t.k-found),active:fresh&&active>=1&&active<=t.k?active:null,done};
+  });
+  const submitted=rows.reduce((sum,r)=>sum+r.found,0),total=rows.length*t.k;
+  const status=monitorError?'Ulanish xatosi: '+esc(monitorError):monitorAt?'Oxirgi yangilanish: '+new Date(monitorAt).toLocaleTimeString('uz-UZ'):'Maʼlumotlar yuklanmoqda';
+  v.innerHTML=`<div class="card"><h3>Talabalar savol kiritishi — jonli monitoring</h3>
+  <p class="mu">${esc(t.name)} · Maʼlumotlar har 3 soniyada serverdan olinadi. Admin talabalarning hali yozib tugatilmagan matnini emas, kiritgan savollari sonini va faol savol raqamini ko‘radi.</p>
+  <div class="row" style="margin-bottom:12px"><button data-refresh="1">Hozir yangilash</button><span class="mu" style="color:${monitorError?'#b91c1c':'inherit'}">${status}</span></div>
+  <div class="grid" style="margin-bottom:12px"><div class="card"><b>${rows.length}</b><div class="mu">Talabalar</div></div><div class="card"><b>${submitted}/${total}</b><div class="mu">Kiritilgan savollar</div></div><div class="card"><b>${Math.max(0,total-submitted)}</b><div class="mu">Kiritilmagan savollar</div></div><div class="card"><b>${rows.filter(r=>r.done).length}</b><div class="mu">To‘liq topshirganlar</div></div></div>
+  <div class="tw"><table><tr><th>Talaba</th><th>Kiritgan</th><th>Qolgan</th><th>Qaysi savolda?</th><th>Holati</th></tr>
+  ${rows.map(r=>`<tr><td>${esc(nm(r.id))}</td><td><b>${r.found}/${t.k}</b></td><td>${r.remaining}</td><td>${r.active?r.active+'-savol':r.done?'Tugallagan':'Faol emas / nomaʼlum'}</td><td>${r.done?'<span class="b-ok">Tayyor</span>':r.active?'Yozmoqda':'Kutmoqda'}</td></tr>`).join('')}</table></div>
+  <p class="mu" style="margin-top:10px">«Faol emas / nomaʼlum» — talaba sahifada savol maydoniga kirmagan yoki oxirgi 15 soniyada faol signal kelmagan. Bu talaba umuman ishlamayapti degani emas.</p></div>`;
+  return;
+ }
  if(!t){v.innerHTML='<div class="card mu">Avval mavzu qoʻshing.</div>';return}
  if(!t.asg.length){v.innerHTML='<div class="card mu">Bu mavzu uchun “Tasodifiy taqsimlash” tugmasini bosing.</div>';return}
  if(tab==='d'){
@@ -208,7 +254,7 @@ function rView(){
    m.map(a=>{const k=t.asg.indexOf(a);return `<div class="it"><span>${lb(t,a.from)} — ${a.q}-savol<br><span class="mu">${esc(((Q[t.id]||{})[a.from]||[])[a.q-1]||'savol kiritilmagan')}</span></span>${a.r?RT(a.r)+`<small class="mu"> (${esc(a.gradedBy||'')})</small>`:`<button class="sm ok" data-r="${k}" data-v="1">Toʻgʻri</button><button class="sm no" data-r="${k}" data-v="2">Notoʻgʻri</button>`}</div>`}).join('')+'</div>'}).join('')+'</div>';
  }
 }
-const SUBS=[['s','Talabalar'],['m','Mavzular'],['z','Taqsimlash'],['n','Javob berish navbati'],['a','Baholash'],['d','Kim kimga savol beradi'],['r','Natijalar'],['t','Reyting'],['h','Tarix']];
+const SUBS=[['s','Talabalar'],['m','Mavzular'],['z','Taqsimlash'],['x','Savollar monitoringi'],['n','Javob berish navbati'],['a','Baholash'],['d','Kim kimga savol beradi'],['r','Natijalar'],['t','Reyting'],['h','Tarix']];
 function rNav(){
  let h=`<button data-p="g" class="${page==='g'?'on':''}">Guruhlar</button>`;
  S.groups.forEach(x=>{const sel=x.id===S.g;
@@ -216,8 +262,9 @@ function rNav(){
   if(sel)h+=SUBS.map(([p,l])=>`<button class="sub ${page===p?'on':''}" data-p="${p}">${l}</button>`).join('')});
  $('#nv').innerHTML=h+'<button data-lo="1" style="margin-top:12px;color:var(--mu)">Chiqish</button>'}
 function render(){if(!G()&&page!=='g')page='g';rGroups();rTopics();rList();
- const g=G(),vp='adrthn'.includes(page);if(vp)tab=page;
+ const g=G(),vp='adrthnx'.includes(page);if(vp)tab=page;
  [['#c1','g'],['#c2','s'],['#c3','m'],['#c4','z']].forEach(([c,p])=>$(c).hidden=!(page===p&&(p==='g'||g)));
+ rDistribution();
  if(vp)rView();else $('#view').innerHTML=(page!=='g'&&!g)?'<div class="card mu">Avval “Guruhlar” boʻlimida guruh qoʻshing va unga kiring.</div>':'';
  rNav()}
 function pick(gid){S.g=gid;const l=gt();S.cur=l.length?l[l.length-1].id:null;hist=null}
@@ -235,14 +282,15 @@ function generate(){
  const t=T();if(!t){dlg('Avval mavzu qoʻshing.','a');return}if(t.turnQueue?.length){dlg('Navbat tuzilgan mavzuni qayta taqsimlab bo‘lmaydi.','a');return}
  const n=gs().length,k=parseInt($('#k').value,10);
  if(n<2||!(k>=1)||k>n-1){dlg(`Savollar soni 1 dan ${Math.max(n-1,1)} gacha boʻlishi kerak (guruhdagi talabalar: ${n}).`,'a');return}
+ if(t.asg.some(a=>a.r)||t.turnStartedAt){dlg('Baholash boshlangan mavzuni qayta taqsimlab bo‘lmaydi. Natijalarni saqlash uchun yangi mavzu oching.','a');return}
  const run=()=>{
   t.k=S.k=k;t.order=gs().map(s=>s.id);t.names=Object.fromEntries(gs().map(s=>[s.id,s.name]));
   const perm=shuf(t.order),offs=shuf([...Array(n-1).keys()].map(i=>i+1)).slice(0,k);
   t.asg=[];
   perm.forEach((from,j)=>{const qs=shuf([...Array(k).keys()].map(i=>i+1));
    offs.forEach((o,i)=>t.asg.push({from,to:perm[(j+o)%n],q:qs[i],r:0}))});
-  page='a';save();render()};
- if(t.asg.length)dlg('Yangi taqsimot bu mavzudagi natijalarni oʻchiradi. Davom etasizmi?','c',null,run);else run()}
+  page='z';save();render()};
+ if(t.asg.length)dlg('Bu guruh va mavzuning avvalgi taqsimoti yangisiga almashtiriladi. Eski taqsimot natijalari saqlanmaydi. Davom etasizmi?','c',null,run);else run()}
 
 // Students: track the focused question without revealing unfinished draft text to other students.
 let draftTimer=null, draftChain=Promise.resolve(), activeDraft=null;
@@ -289,7 +337,7 @@ document.addEventListener('click',e=>{
  else if(b.id==='add')addStudent();
  else if(b.id==='tadd')addTopic();
  else if(b.id==='gen')generate();
- else if(d.p){page=d.p;render();if(['a','d','n'].includes(d.p))rq()}
+ else if(d.p){page=d.p;render();if(['a','d','n','x'].includes(d.p))rq()}
  else if(d.refresh){rq()}
  else if(d.maketurn){const t=T();if(!t)return;const m=Number($('#turnminutes').value),a=Number($('#answerminutes').value);if(!Number.isInteger(m)||m<1||m>30||!Number.isInteger(a)||a<1||a>30){dlg('Har bir vaqt 1–30 daqiqa bo‘lishi kerak.','a');return}api('turn-create',{topicId:t.id,minutes:m,answerMinutes:a,showQuestionAuthor:$('#showauthor').checked}).then(()=>api('get')).then(d=>{Object.assign(S,d.state);Q=d.q||{};render()}).catch(e=>dlg(e.message,'a'))}
  else if(d.startturn){const t=T();if(!t)return;dlg('Navbat boshlansinmi? Boshlangandan so‘ng har bir talabaga savollar faqat o‘z vaqtida ochiladi.','c',null,()=>api('turn-start',{topicId:t.id}).then(()=>api('get')).then(d=>{Object.assign(S,d.state);Q=d.q||{};render()}).catch(e=>dlg(e.message,'a')))}
@@ -321,7 +369,18 @@ document.addEventListener('change',e=>{if(e.target.id==='srt'){S.sort=e.target.v
 [['#nm',addStudent],['#tn',addTopic],['#gd',addGroup]].forEach(([i,f])=>$(i).addEventListener('keydown',e=>{if(e.key==='Enter')f()}));
 $('#lp').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
 boot();
-setInterval(async()=>{if(!TOKEN)return;try{if(ROLE==='student'){await stuRender()}else if(ROLE==='admin'&&['n','a'].includes(page)&&!tm){const d=await api('get');Object.assign(S,d.state||{});Q=d.q||{};P=d.progress||{};rView()}}catch(e){}},3000);
+setInterval(async()=>{
+ if(!TOKEN)return;
+ try{
+   if(ROLE==='student'){await stuRender()}
+   else if(ROLE==='admin'&&['x','n','a'].includes(page)&&!tm&&!refreshBusy){
+     refreshBusy=true;
+     try{const d=await api('get');Object.assign(S,d.state||{});Q=d.q||{};P=d.progress||{};monitorAt=Date.now();monitorError='';rView()}
+     catch(e){monitorError=e.message;if(['x','n'].includes(page))rView()}
+     finally{refreshBusy=false}
+   }
+ }catch(e){}
+},3000);
 </script>
 </body>
 </html>
