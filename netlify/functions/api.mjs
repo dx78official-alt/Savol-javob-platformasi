@@ -29,7 +29,29 @@ export default async (req) => {
     }));
   };
   const current = t => (t.turnStartedAt && !t.turnFinishedAt && Number.isInteger(t.turnCursor)) ? t.turnQueue?.[t.turnCursor] : null;
-  const stage = t => !current(t) ? 'Kutilmoqda' : Date.now() - t.turnProgressAt < t.turnPrepMinutes*60000 ? 'Tayyorlanish' : 'Javob berish';
+  const entries = t => (t.asg || []).filter(a => a.to === current(t));
+  const stage = t => !current(t) ? 'Kutilmoqda' : (Date.now() - t.turnProgressAt < (t.turnPrepMinutes||0)*60000 ? 'Tayyorlanish' : 'Javob berish');
+  const nextQuestion = async t => {
+    if (!current(t) || stage(t) !== 'Javob berish') return false;
+    if (!Number.isInteger(t.questionCursor)) { t.questionCursor = 0; t.questionStartedAt = t.turnProgressAt + t.turnPrepMinutes*60000; }
+    const list=entries(t);
+    let moved=false;
+    while (t.questionCursor < list.length) {
+      const a=list[t.questionCursor], got=await grade(t.id,a);
+      if(!got && Date.now() < t.questionStartedAt+(t.turnAnswerMinutes||3)*60000)break;
+      t.questionCursor++;
+      t.questionStartedAt = got ? Math.max(t.questionStartedAt, got.at) : t.questionStartedAt+(t.turnAnswerMinutes||3)*60000;
+      moved=true;
+    }
+    return moved;
+  };
+  const reconcile = async () => {
+    let changed=false;
+    for(const t of S.topics)if(await nextQuestion(t))changed=true;
+    if(changed)await st.setJSON('state',S);
+  };
+  // Reconcile completed/expired questions during polling, never auto-advance a student turn.
+  await reconcile();
 
 
   if (b.action === "login") {
@@ -68,6 +90,9 @@ export default async (req) => {
       t.turnQueue = order;
       t.turnPrepMinutes = minutes;
       t.turnAnswerMinutes = answerMinutes;
+      t.showQuestionAuthor = b.showQuestionAuthor === true;
+      t.questionCursor = 0;
+      t.questionStartedAt = null;
       t.turnStartedAt = null;
       t.turnProgressAt = null;
       t.turnCursor = 0;
@@ -89,16 +114,20 @@ export default async (req) => {
       t.turnProgressAt = t.turnStartedAt;
       t.turnCursor = 0;
       t.turnFinishedAt = null;
+      t.questionCursor = 0;
+      t.questionStartedAt = t.turnStartedAt+t.turnPrepMinutes*60000;
       await st.setJSON("state", S);
       return J({ ok: 1 });
     }
     if (b.action === "turn-next") {
       const t = S.topics.find(t => t.id === b.topicId);
       if (!t || !current(t)) return J({error:"Faol navbat topilmadi"},400);
-      const minMs = (t.turnPrepMinutes+t.turnAnswerMinutes)*60000;
-      if (Date.now()-t.turnProgressAt < minMs) return J({error:"Har bir talaba uchun belgilangan teng vaqt hali tugamadi"},409);
+      await nextQuestion(t);
+      if(t.questionCursor < entries(t).length) return J({error:"Talabaning barcha savollari yakunlanmagan. Keyingi savolni kuting."},409);
       t.turnCursor++;
       t.turnProgressAt = Date.now();
+      t.questionCursor = 0;
+      t.questionStartedAt = t.turnProgressAt+t.turnPrepMinutes*60000;
       if (t.turnCursor >= t.turnQueue.length) t.turnFinishedAt = t.turnProgressAt;
       await st.setJSON("state", S);
       return J({ok:1});
@@ -109,10 +138,11 @@ export default async (req) => {
       if (!a || ![1,2].includes(b.value)) return J({error:"Savol yoki baho noto‘g‘ri"},400);
       if (!t.turnStartedAt) return J({error:"Javob berish boshlanmagan"},400);
       if (current(t)!==a.to) return J({error:"Bu savol uchun hozir baholab bo‘lmaydi"},403);
-      if (stage(t)!=='Javob berish') return J({error:"Tayyorlanish bosqichi davom etmoqda"},403);
+      if (stage(t)!=='Javob berish' || entries(t)[t.questionCursor]!==a || Date.now()>=t.questionStartedAt+t.turnAnswerMinutes*60000) return J({error:"Faqat hozirgi, vaqti tugamagan savol baholanadi"},403);
       const key=gradeKey(t.id,a);
       const claim=await st.setJSON(key,{value:b.value,by:"admin",at:Date.now()},{onlyIfNew:true});
       const got=await grade(t.id,a);
+      if(claim.modified) await reconcile();
       return J({ok:!!claim.modified,grade:got,already:!claim.modified});
     }
     if (b.action === "get") {
@@ -132,7 +162,7 @@ export default async (req) => {
           if (JSON.stringify(old.asg.map(a=>[a.from,a.to,a.q])) !== JSON.stringify((topic.asg||[]).map(a=>[a.from,a.to,a.q])))
             return J({error:"Boshlangan navbatning taqsimotini o‘zgartirib bo‘lmaydi"},400);
         }
-        if (old?.turnQueue) {for(const prop of ['turnQueue','turnPrepMinutes','turnAnswerMinutes','turnStartedAt','turnProgressAt','turnCursor','turnFinishedAt'])topic[prop]=old[prop]??null;}
+        if (old?.turnQueue) {for(const prop of ['turnQueue','turnPrepMinutes','turnAnswerMinutes','turnStartedAt','turnProgressAt','turnCursor','turnFinishedAt','questionCursor','questionStartedAt','showQuestionAuthor'])topic[prop]=old[prop]??null;}
         // Scores belong exclusively to the score API; a stale browser save cannot revert them.
         if (old?.asg) for(const a of topic.asg||[]) {
           const prev=old.asg.find(x=>x.from===a.from&&x.to===a.to&&x.q===a.q);
@@ -160,27 +190,26 @@ export default async (req) => {
       await gradesFor(t);
       const currentId=current(t), myTurn=currentId===me.id;
       const inbox = [];
-      if(myTurn){
-        for (const a of t.asg.filter(x=>x.to===me.id)) {
-          const m = await ask(a.from);
-          inbox.push({ from: nm(a.from), q:a.q, text:(m[t.id]||[])[a.q-1]||"",r:a.r||0,gradedBy:a.gradedBy||null });
-        }
+      if(myTurn && stage(t)==='Javob berish') {
+        const a=entries(t)[t.questionCursor];
+        if(a){const m=await ask(a.from);inbox.push({from:t.showQuestionAuthor?nm(a.from):null,q:t.questionCursor+1,text:(m[t.id]||[])[a.q-1]||'',r:a.r||0,gradedBy:a.gradedBy||null});}
       }
-      inbox.sort((x,y)=>x.from.localeCompare(y.from)||x.q-y.q);
       const used=myTurn?Date.now()-t.turnProgressAt:0;
       const isPrep=myTurn && used<t.turnPrepMinutes*60000;
-      const remainingSeconds=myTurn?Math.max(0,Math.ceil(((isPrep?t.turnPrepMinutes*60000:(t.turnPrepMinutes+t.turnAnswerMinutes)*60000)-used)/1000)):0;
+      const currentA=currentId?entries(t)[t.questionCursor]:null;
+      const questionLeft=myTurn&&!isPrep&&currentA?Math.max(0,Math.ceil((t.questionStartedAt+t.turnAnswerMinutes*60000-Date.now())/1000)):0;
+      const remainingSeconds=myTurn?(isPrep?Math.max(0,Math.ceil((t.turnPrepMinutes*60000-used)/1000)):questionLeft):0;
       const turnLabel=t.turnFinishedAt?'Barcha navbatlar yakunlandi':t.turnStartedAt ? `Navbat ${t.turnCursor+1}/${t.turnQueue.length}` : 'Javob berish hali boshlanmagan';
       const outgoing=[];
       if(t.turnStartedAt && stage(t)==='Javob berish') {
-        for (const a of t.asg.filter(x=>x.from===me.id && x.to===currentId)) {
+        for (const a of t.asg.filter(x=>x.from===me.id && x.to===currentId && x===currentA)) {
           const ownQ=own[t.id]||[];
           outgoing.push({from:a.from,to:a.to,recipient:nm(a.to),q:a.q,text:ownQ[a.q-1]||'',r:a.r||0, gradedBy:a.gradedBy||null});
         }
       }
       topics.push({ id: t.id, name: t.name, k: t.k, mine: own[t.id] || [], inbox,
         turnStarted:!!t.turnStartedAt, questionsLocked:!!t.turnQueue?.length, myTurn, remainingSeconds, turnLabel, stage:isPrep?"Tayyorlanish":"Javob berish", outgoing,
-        turnFinished:!!t.turnFinishedAt });
+        turnFinished:!!t.turnFinishedAt, questionIndex:t.questionCursor||0, questionCount:currentId?entries(t).length:0, waitingForAdmin:myTurn&&!isPrep&&!currentA });
     }
     return J({ name: me.name, group: g.name, course: g.course, dir: g.dir, topics });
   }
@@ -189,9 +218,10 @@ export default async (req) => {
     const t=mine.find(x=>x.id===b.topicId);
     const a=t?.asg?.find(x=>x.from===me.id&&x.to===b.to&&x.q===b.q);
     if(!a||![1,2].includes(b.value))return J({error:"Savol yoki baho noto‘g‘ri"},400);
-    if(current(t)!==a.to||stage(t)!=='Javob berish')return J({error:"Bu savol hozir baholanmaydi"},403);
+    if(current(t)!==a.to||stage(t)!=='Javob berish'||entries(t)[t.questionCursor]!==a || Date.now()>=t.questionStartedAt+t.turnAnswerMinutes*60000)return J({error:"Bu savol hozir baholanmaydi yoki vaqti tugagan"},403);
     const result=await st.setJSON(gradeKey(t.id,a),{value:b.value,by:me.name,at:Date.now()},{onlyIfNew:true});
     const got=await grade(t.id,a);
+    if(result.modified) await reconcile();
     return J({ok:!!result.modified, grade:got, already:!result.modified});
   }
   if (b.action === "submit") {
