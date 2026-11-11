@@ -18,6 +18,8 @@ export default async (req) => {
   const b = await req.json().catch(() => ({}));
   const st = getStore({ name: "savoljavob", consistency: "strong" });
   const S = (await st.get("state", { type: "json" })) || { students: [], groups: [], topics: [] };
+  const progressKey = (topicId, sid) => `progress:${topicId}:${sid}`;
+  const getProgress = async (topicId, sid) => await st.get(progressKey(topicId, sid), { type: "json" });
   const getQ = async (sid) => (await st.get("q:" + sid, { type: "json" })) || {};
   // Atomic per-question score claim: the first accepted write cannot be overwritten.
   const gradeKey = (topicId, a) => `grade:${topicId}:${a.from}:${a.to}:${a.q}`;
@@ -152,7 +154,12 @@ export default async (req) => {
         const m = await getQ(s.id);
         for (const [tid, arr] of Object.entries(m)) (q[tid] ||= {})[s.id] = arr;
       }));
-      return J({ state: S, q });
+      const progress = {};
+      await Promise.all(S.topics.flatMap(t => (t.order||[]).map(async sid => {
+        const p=await getProgress(t.id,sid);
+        if(p) (progress[t.id] ||= {})[sid] = p;
+      })));
+      return J({ state: S, q, progress, serverNow: Date.now() });
     }
     if (b.action === "save" && b.state && Array.isArray(b.state.students)) {
       // Keep server-owned turn state; ordinary admin edits must not roll back an active queue.
@@ -224,6 +231,14 @@ export default async (req) => {
     if(result.modified) await reconcile();
     return J({ok:!!result.modified, grade:got, already:!result.modified});
   }
+  if (b.action === "progress") {
+    const t=mine.find(x=>x.id===b.topicId);
+    if(!t) return J({error:"Mavzu topilmadi"},400);
+    const active=Number.isInteger(b.activeQuestion)&&b.activeQuestion>=1&&b.activeQuestion<=t.k&&!t.turnQueue?.length
+      ? b.activeQuestion : null;
+    await st.setJSON(progressKey(t.id,me.id), {activeQuestion:active, updatedAt:Date.now()});
+    return J({ok:1});
+  }
   if (b.action === "submit") {
     const t = mine.find((x) => x.id === b.topicId);
     if (!t || !Array.isArray(b.questions)) return J({ error: "Mavzu topilmadi" }, 400);
@@ -231,6 +246,8 @@ export default async (req) => {
     const own = await getQ(me.id);
     own[t.id] = b.questions.slice(0, t.k).map((x) => String(x || "").slice(0, 1000));
     await st.setJSON("q:" + me.id, own);
+    const active=Number.isInteger(b.activeQuestion)&&b.activeQuestion>=1&&b.activeQuestion<=t.k ? b.activeQuestion : null;
+    await st.setJSON(progressKey(t.id,me.id), {activeQuestion:active, updatedAt:Date.now()});
     return J({ ok: 1 });
   }
   return J({ error: "Nomaʼlum amal" }, 400);
