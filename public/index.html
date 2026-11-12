@@ -109,7 +109,7 @@ const num=(t,id)=>t.order.indexOf(id)+1;
 const turnIndex=t=>t&&t.turnStartedAt?Number(t.turnCursor||0):-1;
 const turnId=t=>t&&t.turnStartedAt&&!t.turnFinishedAt&&t.turnQueue?t.turnQueue[turnIndex(t)]:null;
 const turnStage=t=>!turnId(t)?'Yakunlangan':!turnEntries(t)[t.questionCursor]?'Savollar tugadi':t.questionReadyAt||Date.now()>=(t.questionStartedAt||Date.now())+(t.turnPrepMinutes||2)*60000?'Javob berish':'Tayyorlanish';
-const turnEntries=t=>t.asg.filter(a=>a.to===turnId(t));
+const turnEntries=t=>t.asg.filter(a=>a.to===turnId(t)).sort((a,b)=>a.q-b.q);
 const turnDone=t=>!!turnId(t)&&(t.questionCursor||0)>=turnEntries(t).length;
 const turnSecs=t=>{if(!turnId(t)||turnDone(t))return 0;
 const start=t.questionStartedAt||Date.now(),pre=(t.turnPrepMinutes||2)*60000;
@@ -166,7 +166,7 @@ function rDistribution(){
  if(!assigned){box.innerHTML=t?'<p class="mu">Bu guruh va mavzu uchun hali taqsimot amalga oshirilmagan.</p>':'';return}
  // Savollar manzillari avvalgi saqlangan taqsimotdan olinadi; hech qanday qayta generatsiya qilinmaydi.
  const rows=t.asg.slice().sort((a,b)=>num(t,a.from)-num(t,b.from)||a.q-b.q);
- box.innerHTML=`<h3 style="margin:0 0 8px">Taqsimlash natijalari</h3>
+ box.innerHTML=`<h3 style="margin:0 0 8px">Taqsimlash natijalari</h3><p class="mu">Har bir javob beruvchining 1-savoli boshqa talabaning 1-savolidan, 2-savoli boshqa talabaning 2-savolidan olinadi. Bir muallifdan bir javob beruvchiga ikki savol tushmaydi.</p>
  <p class="mu" style="margin:0 0 8px">${rows.length} ta savol · ${t.order.length} nafar talaba · Har biriga ${t.k} tadan savol. Natijalar ushbu guruh va mavzu uchun saqlangan.</p>
  <div class="tw"><table><thead><tr><th>Savol beruvchi</th><th>Qaysi savoli</th><th>Javob beruvchi</th></tr></thead><tbody>
  ${rows.map(a=>`<tr><td>${esc(nm(a.from))}</td><td>${a.q}-savol</td><td>${esc(nm(a.to))}</td></tr>`).join('')}
@@ -286,10 +286,13 @@ function generate(){
  if(t.asg.some(a=>a.r)||t.turnStartedAt){dlg('Baholash boshlangan mavzuni qayta taqsimlab bo‘lmaydi. Natijalarni saqlash uchun yangi mavzu oching.','a');return}
  const run=()=>{
   t.k=S.k=k;t.order=gs().map(s=>s.id);t.names=Object.fromEntries(gs().map(s=>[s.id,s.name]));
+  // Each question number q is assigned in the same q-th position of the recipient.
+  // Unique cyclic offsets guarantee each recipient gets questions from k DISTINCT authors.
+  // Nonzero offsets ensure no student receives their own question.
   const perm=shuf(t.order),offs=shuf([...Array(n-1).keys()].map(i=>i+1)).slice(0,k);
   t.asg=[];
-  perm.forEach((from,j)=>{const qs=shuf([...Array(k).keys()].map(i=>i+1));
-   offs.forEach((o,i)=>t.asg.push({from,to:perm[(j+o)%n],q:qs[i],r:0}))});
+  perm.forEach((from,j)=>{
+   offs.forEach((o,i)=>t.asg.push({from,to:perm[(j+o)%n],q:i+1,r:0}))});
   page='z';save();render()};
  if(t.asg.length)dlg('Bu guruh va mavzuning avvalgi taqsimoti yangisiga almashtiriladi. Eski taqsimot natijalari saqlanmaydi. Davom etasizmi?','c',null,run);else run()}
 
