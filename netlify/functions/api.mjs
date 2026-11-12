@@ -33,7 +33,7 @@ export default async (req) => {
   // One preparation window per visible question. There is NO answer countdown.
   // The respondent may end preparation early. Only the reviewer/admin may grade.
   const current = t => (t.turnStartedAt && !t.turnFinishedAt && Number.isInteger(t.turnCursor)) ? t.turnQueue?.[t.turnCursor] : null;
-  const entries = t => (t.asg || []).filter(a => a.to === current(t));
+  const entries = t => (t.asg || []).filter(a => a.to === current(t)).sort((a,b)=>a.q-b.q);
   const prepMs = t => (t.turnPrepMinutes || 2) * 60000;
   const stage = t => {
     if (!current(t) || !entries(t)[t.questionCursor]) return 'Kutilmoqda';
