@@ -27,34 +27,59 @@ export default async (req) => {
   const gradesFor = async (t) => {
     await Promise.all((t.asg||[]).map(async a => {
       const g = await grade(t.id, a);
-      if (g) { a.r = g.value; a.gradedBy = g.by; a.gradedAt = g.at; }
+      if (g) { a.r = g.scale === 5 ? g.value : (g.value === 1 ? 5 : 0); a.gradedBy = g.by; a.gradedAt = g.at; }
     }));
   };
+  // One preparation window per visible question. There is NO answer countdown.
+  // The respondent may end preparation early. Only the reviewer/admin may grade.
   const current = t => (t.turnStartedAt && !t.turnFinishedAt && Number.isInteger(t.turnCursor)) ? t.turnQueue?.[t.turnCursor] : null;
   const entries = t => (t.asg || []).filter(a => a.to === current(t));
-  const stage = t => !current(t) ? 'Kutilmoqda' : (Date.now() - t.turnProgressAt < (t.turnPrepMinutes||0)*60000 ? 'Tayyorlanish' : 'Javob berish');
+  const prepMs = t => (t.turnPrepMinutes || 2) * 60000;
+  const stage = t => {
+    if (!current(t) || !entries(t)[t.questionCursor]) return 'Kutilmoqda';
+    const earlyReady = t.questionReadyAt && t.questionReadyAt >= t.questionStartedAt;
+    return earlyReady || Date.now() >= (t.questionStartedAt || Date.now()) + prepMs(t) ? 'Javob berish' : 'Tayyorlanish';
+  };
   const nextQuestion = async t => {
-    if (!current(t) || stage(t) !== 'Javob berish') return false;
-    if (!Number.isInteger(t.questionCursor)) { t.questionCursor = 0; t.questionStartedAt = t.turnProgressAt + t.turnPrepMinutes*60000; }
-    const list=entries(t);
-    let moved=false;
+    if (!current(t)) return false;
+    if (!Number.isInteger(t.questionCursor)) t.questionCursor = 0;
+    if (!t.questionStartedAt) t.questionStartedAt = t.turnProgressAt || t.turnStartedAt;
+    let moved = false;
+    const list = entries(t);
     while (t.questionCursor < list.length) {
-      const a=list[t.questionCursor], got=await grade(t.id,a);
-      if(!got && Date.now() < t.questionStartedAt+(t.turnAnswerMinutes||3)*60000)break;
+      const a = list[t.questionCursor], got = await grade(t.id, a);
+      // Do not move until a first accepted grade exists. A delayed grade is valid.
+      if (!got) break;
       t.questionCursor++;
-      t.questionStartedAt = got ? Math.max(t.questionStartedAt, got.at) : t.questionStartedAt+(t.turnAnswerMinutes||3)*60000;
-      moved=true;
+      // Next question is visible as soon as the grade is accepted.
+      t.questionStartedAt = Date.now();
+      t.questionReadyAt = null;
+      moved = true;
     }
     return moved;
   };
   const reconcile = async () => {
-    let changed=false;
-    for(const t of S.topics)if(await nextQuestion(t))changed=true;
-    if(changed)await st.setJSON('state',S);
+    let changed = false;
+    for (const t of S.topics) if (await nextQuestion(t)) changed = true;
+    if (changed) await st.setJSON('state', S);
   };
-  // Reconcile completed/expired questions during polling, never auto-advance a student turn.
   await reconcile();
-
+  const scoreValid = x => Number.isInteger(x) && x >= 0 && x <= 5;
+  const rankings = t => {
+    const results = (t.order || []).map(id => {
+      const a = (t.asg || []).filter(a => a.to === id);
+      // Every question must be graded to advance; missing grades are reported separately.
+      const sum = a.reduce((v, q) => v + (q.gradedAt ? Number(q.r) || 0 : 0), 0);
+      return {id, average: a.length ? Math.round(sum/a.length*100)/100 : 0,
+        sum, count:a.length, rated:a.filter(q=>q.gradedAt).length,
+        ungraded:a.length-a.filter(q=>q.gradedAt).length};
+    });
+    results.sort((a,b)=>b.average-a.average||b.sum-a.sum||(t.order||[]).indexOf(a.id)-(t.order||[]).indexOf(b.id));
+    let last=null, place=0;
+    results.forEach((x,i)=>{if(x.average!==last){place=i+1;last=x.average;}x.place=place;});
+    return results;
+  };
+  const finishedTopic = t => Boolean(t.turnFinishedAt && (t.turnQueue || []).length);
 
   if (b.action === "login") {
     const login = String(b.login || ""), pw = String(b.password || "");
@@ -76,8 +101,8 @@ export default async (req) => {
       const t = S.topics.find(t => t.id === b.topicId);
       if (!t || !t.asg.length || !t.order.length) return J({ error: "Avval savollarni taqsimlang" }, 400);
       if (t.turnStartedAt) return J({ error: "Navbat allaqachon boshlangan" }, 400);
-      const minutes = Number(b.minutes), answerMinutes = Number(b.answerMinutes);
-      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 30 || !Number.isInteger(answerMinutes) || answerMinutes < 1 || answerMinutes > 30) return J({ error: "Vaqt 1–30 daqiqa bo‘lsin" }, 400);
+      const minutes = Number(b.minutes);
+      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 30) return J({ error: "Tayyorlanish vaqti 1–30 daqiqa bo‘lsin" }, 400);
       for (const id of t.order) {
         const own = await getQ(id);
         const q = own[t.id] || [];
@@ -91,16 +116,31 @@ export default async (req) => {
       }
       t.turnQueue = order;
       t.turnPrepMinutes = minutes;
-      t.turnAnswerMinutes = answerMinutes;
+      delete t.turnAnswerMinutes;
       t.showQuestionAuthor = b.showQuestionAuthor === true;
       t.questionCursor = 0;
       t.questionStartedAt = null;
+      t.questionReadyAt = null;
       t.turnStartedAt = null;
       t.turnProgressAt = null;
       t.turnCursor = 0;
       t.turnFinishedAt = null;
       await st.setJSON("state", S);
       return J({ ok: 1 });
+    }
+    if (b.action === "turn-settings") {
+      const t = S.topics.find(x => x.id === b.topicId);
+      if (!t) return J({error:"Mavzu topilmadi"},404);
+      if (t.turnFinishedAt) return J({error:"Yakunlangan mavzu sozlamalari o‘zgartirilmaydi"},409);
+      if (typeof b.showQuestionAuthor === 'boolean') t.showQuestionAuthor = b.showQuestionAuthor;
+      if (b.minutes !== undefined) {
+        if (t.turnStartedAt) return J({error:"Navbat boshlangan: vaqtni o‘zgartirish mumkin emas"},409);
+        if (!Number.isInteger(b.minutes) || b.minutes<1 || b.minutes>30)
+          return J({error:"Tayyorlanish vaqti 1–30 daqiqa bo‘lsin"},400);
+        t.turnPrepMinutes=b.minutes;
+      }
+      await st.setJSON('state',S);
+      return J({ok:1});
     }
     if (b.action === "turn-start") {
       const t = S.topics.find(t => t.id === b.topicId);
@@ -117,7 +157,8 @@ export default async (req) => {
       t.turnCursor = 0;
       t.turnFinishedAt = null;
       t.questionCursor = 0;
-      t.questionStartedAt = t.turnStartedAt+t.turnPrepMinutes*60000;
+      t.questionStartedAt = t.turnStartedAt;
+      t.questionReadyAt = null;
       await st.setJSON("state", S);
       return J({ ok: 1 });
     }
@@ -129,7 +170,8 @@ export default async (req) => {
       t.turnCursor++;
       t.turnProgressAt = Date.now();
       t.questionCursor = 0;
-      t.questionStartedAt = t.turnProgressAt+t.turnPrepMinutes*60000;
+      t.questionStartedAt = t.turnProgressAt;
+      t.questionReadyAt = null;
       if (t.turnCursor >= t.turnQueue.length) t.turnFinishedAt = t.turnProgressAt;
       await st.setJSON("state", S);
       return J({ok:1});
@@ -137,12 +179,12 @@ export default async (req) => {
     if (b.action === "grade") {
       const t=S.topics.find(x=>x.id===b.topicId);
       const a=t?.asg?.find(x=>x.from===b.from&&x.to===b.to&&x.q===b.q);
-      if (!a || ![1,2].includes(b.value)) return J({error:"Savol yoki baho noto‘g‘ri"},400);
+      if (!a || !scoreValid(b.value)) return J({error:"Savol yoki baho noto‘g‘ri"},400);
       if (!t.turnStartedAt) return J({error:"Javob berish boshlanmagan"},400);
       if (current(t)!==a.to) return J({error:"Bu savol uchun hozir baholab bo‘lmaydi"},403);
-      if (stage(t)!=='Javob berish' || entries(t)[t.questionCursor]!==a || Date.now()>=t.questionStartedAt+t.turnAnswerMinutes*60000) return J({error:"Faqat hozirgi, vaqti tugamagan savol baholanadi"},403);
+      if (stage(t)!=='Javob berish' || entries(t)[t.questionCursor]!==a) return J({error:"Faqat javob berish bosqichidagi savol baholanadi"},403);
       const key=gradeKey(t.id,a);
-      const claim=await st.setJSON(key,{value:b.value,by:"admin",at:Date.now()},{onlyIfNew:true});
+      const claim=await st.setJSON(key,{value:b.value,by:"admin",at:Date.now(),scale:5},{onlyIfNew:true});
       const got=await grade(t.id,a);
       if(claim.modified) await reconcile();
       return J({ok:!!claim.modified,grade:got,already:!claim.modified});
@@ -169,11 +211,11 @@ export default async (req) => {
           if (JSON.stringify(old.asg.map(a=>[a.from,a.to,a.q])) !== JSON.stringify((topic.asg||[]).map(a=>[a.from,a.to,a.q])))
             return J({error:"Boshlangan navbatning taqsimotini o‘zgartirib bo‘lmaydi"},400);
         }
-        if (old?.turnQueue) {for(const prop of ['turnQueue','turnPrepMinutes','turnAnswerMinutes','turnStartedAt','turnProgressAt','turnCursor','turnFinishedAt','questionCursor','questionStartedAt','showQuestionAuthor'])topic[prop]=old[prop]??null;}
+        if (old?.turnQueue) {for(const prop of ['turnQueue','turnPrepMinutes','turnStartedAt','turnProgressAt','turnCursor','turnFinishedAt','questionCursor','questionStartedAt','questionReadyAt','showQuestionAuthor'])topic[prop]=old[prop]??null;}
         // Scores belong exclusively to the score API; a stale browser save cannot revert them.
         if (old?.asg) for(const a of topic.asg||[]) {
           const prev=old.asg.find(x=>x.from===a.from&&x.to===a.to&&x.q===a.q);
-          if(prev){a.r=prev.r||0;a.gradedAt=prev.gradedAt||null;a.gradedBy=prev.gradedBy||null;}
+          if(prev){a.r=prev.r??null;a.gradedAt=prev.gradedAt||null;a.gradedBy=prev.gradedBy||null;}
         }
       }
       await st.setJSON("state", b.state);
@@ -197,36 +239,48 @@ export default async (req) => {
       await gradesFor(t);
       const currentId=current(t), myTurn=currentId===me.id;
       const inbox = [];
-      if(myTurn && stage(t)==='Javob berish') {
+      if(myTurn) {
         const a=entries(t)[t.questionCursor];
-        if(a){const m=await ask(a.from);inbox.push({from:t.showQuestionAuthor?nm(a.from):null,q:t.questionCursor+1,text:(m[t.id]||[])[a.q-1]||'',r:a.r||0,gradedBy:a.gradedBy||null});}
+        if(a){const m=await ask(a.from);inbox.push({from:t.showQuestionAuthor?nm(a.from):null,q:t.questionCursor+1,text:(m[t.id]||[])[a.q-1]||'',r:a.r??null,gradedAt:a.gradedAt||null,gradedBy:a.gradedBy||null});}
       }
-      const used=myTurn?Date.now()-t.turnProgressAt:0;
-      const isPrep=myTurn && used<t.turnPrepMinutes*60000;
+      const used=myTurn?Date.now()-(t.questionStartedAt||Date.now()):0;
+      const isPrep=myTurn && !!entries(t)[t.questionCursor] && stage(t)==='Tayyorlanish';
       const currentA=currentId?entries(t)[t.questionCursor]:null;
-      const questionLeft=myTurn&&!isPrep&&currentA?Math.max(0,Math.ceil((t.questionStartedAt+t.turnAnswerMinutes*60000-Date.now())/1000)):0;
-      const remainingSeconds=myTurn?(isPrep?Math.max(0,Math.ceil((t.turnPrepMinutes*60000-used)/1000)):questionLeft):0;
+      const remainingSeconds=myTurn&&currentA&&isPrep ? Math.max(0,Math.ceil(((t.questionStartedAt+prepMs(t))-Date.now())/1000)) : 0;
       const turnLabel=t.turnFinishedAt?'Barcha navbatlar yakunlandi':t.turnStartedAt ? `Navbat ${t.turnCursor+1}/${t.turnQueue.length}` : 'Javob berish hali boshlanmagan';
       const outgoing=[];
       if(t.turnStartedAt && stage(t)==='Javob berish') {
         for (const a of t.asg.filter(x=>x.from===me.id && x.to===currentId && x===currentA)) {
           const ownQ=own[t.id]||[];
-          outgoing.push({from:a.from,to:a.to,recipient:nm(a.to),q:a.q,text:ownQ[a.q-1]||'',r:a.r||0, gradedBy:a.gradedBy||null});
+          outgoing.push({from:a.from,to:a.to,recipient:nm(a.to),q:a.q,text:ownQ[a.q-1]||'',r:a.r??null, gradedAt:a.gradedAt||null, gradedBy:a.gradedBy||null});
         }
       }
-      topics.push({ id: t.id, name: t.name, k: t.k, mine: own[t.id] || [], inbox,
+      const myRank = finishedTopic(t) ? rankings(t).find(x=>x.id===me.id) : null;
+      topics.push({ id: t.id, name: t.name, k: t.k, mine: own[t.id] || [], inbox, showQuestionAuthor:!!t.showQuestionAuthor, ranking:myRank, rankingTotal:(t.order||[]).length,
         turnStarted:!!t.turnStartedAt, questionsLocked:!!t.turnQueue?.length, myTurn, remainingSeconds, turnLabel, stage:isPrep?"Tayyorlanish":"Javob berish", outgoing,
-        turnFinished:!!t.turnFinishedAt, questionIndex:t.questionCursor||0, questionCount:currentId?entries(t).length:0, waitingForAdmin:myTurn&&!isPrep&&!currentA });
+        turnFinished:!!t.turnFinishedAt, questionIndex:t.questionCursor||0, questionCount:currentId?entries(t).length:0, waitingForAdmin:myTurn&&!currentA });
     }
     return J({ name: me.name, group: g.name, course: g.course, dir: g.dir, topics });
   }
 
+  if (b.action === "ready") {
+    const t=mine.find(x=>x.id===b.topicId);
+    if (!t || current(t)!==me.id || !entries(t)[t.questionCursor])
+      return J({error:"Sizning faol savolingiz yo‘q"},403);
+    if (stage(t)==='Tayyorlanish') {
+      // Another request may have moved the question; require the exact cursor.
+      if (Number(b.questionIndex)!==t.questionCursor) return J({error:"Savol allaqachon almashgan"},409);
+      t.questionReadyAt=Date.now();
+      await st.setJSON('state',S);
+    }
+    return J({ok:1});
+  }
   if (b.action === "grade") {
     const t=mine.find(x=>x.id===b.topicId);
     const a=t?.asg?.find(x=>x.from===me.id&&x.to===b.to&&x.q===b.q);
-    if(!a||![1,2].includes(b.value))return J({error:"Savol yoki baho noto‘g‘ri"},400);
-    if(current(t)!==a.to||stage(t)!=='Javob berish'||entries(t)[t.questionCursor]!==a || Date.now()>=t.questionStartedAt+t.turnAnswerMinutes*60000)return J({error:"Bu savol hozir baholanmaydi yoki vaqti tugagan"},403);
-    const result=await st.setJSON(gradeKey(t.id,a),{value:b.value,by:me.name,at:Date.now()},{onlyIfNew:true});
+    if(!a||!scoreValid(b.value))return J({error:"Savol yoki baho noto‘g‘ri"},400);
+    if(current(t)!==a.to||stage(t)!=='Javob berish'||entries(t)[t.questionCursor]!==a)return J({error:"Bu savol hozir baholanmaydi"},403);
+    const result=await st.setJSON(gradeKey(t.id,a),{value:b.value,by:me.name,at:Date.now(),scale:5},{onlyIfNew:true});
     const got=await grade(t.id,a);
     if(result.modified) await reconcile();
     return J({ok:!!result.modified, grade:got, already:!result.modified});
